@@ -124,55 +124,66 @@ def ask_claude(user_message, rows):
     today_str = f"{str(today.month).zfill(2)}/{str(today.day).zfill(2)}"
     today_month = months[today.month - 1]
 
-    recent_rows = [r for r in rows if len(r) >= 3 and r[0] and r[1] and r[2]][-20:]
-    rows_text = "\n".join([f"ROW {i+1}: {' | '.join(r[:5])}" for i, r in enumerate(recent_rows)])
+    # Pass ALL data rows to Claude so it can reason freely over the full dataset
+    data_rows = [r for r in rows if len(r) >= 3 and r[0] and r[1] and r[2]]
+    rows_text = "\n".join([f"{' | '.join(r[:5])}" for r in data_rows])
 
-    system = f"""You are an expense tracking assistant managing a Google Sheet.
+    system = f"""You are an expense tracking assistant managing a Google Sheet for Francis.
 
 Sheet columns: Month, Date (MM/DD), Amount (SGD), Category, Vendor
 Categories: {', '.join(CATEGORIES)}
 Today: {today_month}, {today_str}
 
-Recent rows (last 20):
+Full expense data:
 {rows_text}
 
-Parse the user's message and return ONLY a JSON object — no explanation, no markdown, no backticks.
+You handle two types of requests:
 
-For ADD:
-{{"intent": "add", "month": "April", "date": "04/18", "amount": 12.5, "category": "Grocery", "vendor": "Lunch"}}
+TYPE 1 — ACTIONS (add, edit, delete)
+Return ONLY a JSON object for these. No explanation.
 
-For VIEW:
-{{"intent": "view", "filter": "april" | "last5" | "all" | "category:Grocery", "summary": false}}
+Add: {{"intent": "add", "month": "April", "date": "04/18", "amount": 12.5, "category": "Grocery", "vendor": "Lunch"}}
+Edit: {{"intent": "edit", "description": "last entry", "changes": {{"amount": 280}}}}
+Delete: {{"intent": "delete", "description": "last entry"}}
 
-For DELETE:
-{{"intent": "delete", "description": "last entry" | "04/18 $340 Grocery"}}
+TYPE 2 — QUESTIONS (anything asking about spending, totals, summaries, breakdowns, comparisons)
+Answer directly in plain conversational text. Do not return JSON.
+You have access to all the data above — use it to answer precisely.
+Examples of questions you should answer directly:
+- "What is my total spend for September?"
+- "How much did I spend on groceries this month?"
+- "What was my biggest expense last month?"
+- "Break down my April spending by category"
+- "How does my March spending compare to April?"
+- "What did I spend on Puppy Needs this year?"
+- "Show me all Travel expenses"
+- "What was my most expensive day this week?"
 
-For EDIT:
-{{"intent": "edit", "description": "last entry", "changes": {{"amount": 280}}}}
-
-For SPEND/TOTAL queries ("how much did I spend", "what's my April total", "spending this month"):
-{{"intent": "spend", "month": "April"}}
-
-For UNKNOWN:
-{{"intent": "unknown"}}
-
-Rules:
+Rules for actions:
 - Default date to today if not specified
 - Default category to Grocery for food/meals
-- Vendor: use the place name or meal type (Lunch, Dinner, etc.)
+- Vendor: use the place name or meal type
 - Amount must be a number, not a string
+- For ambiguous requests, ask a clarifying question in plain text
+
+Be concise, direct, and friendly.
 """
 
     response = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=500,
+        max_tokens=1000,
         system=system,
         messages=[{"role": "user", "content": user_message}]
     )
 
     raw = response.content[0].text.strip()
     raw = raw.replace("```json", "").replace("```", "").strip()
-    return json.loads(raw)
+
+    # Try to parse as JSON (action), otherwise return as plain text (answer)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {"intent": "answer", "text": raw}
 
 # ── PENDING CONFIRMATIONS ────────────────────────────────────────────────────
 
@@ -291,6 +302,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"📊 {month} spend to date: SGD {amount}")
             else:
                 await update.message.reply_text(f"Couldn't find spend data for {month}.")
+
+        elif intent == "answer":
+            await update.message.reply_text(parsed.get("text", "I'm not sure how to answer that."))
 
         else:
             await update.message.reply_text(
